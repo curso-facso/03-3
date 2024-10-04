@@ -1,0 +1,6 @@
+data/
+venv/
+.Rhistory
+.Rproj.user/
+tabla-comparativa.xlsx
+testear-duckdb.sql

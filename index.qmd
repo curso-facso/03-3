@@ -1,0 +1,1320 @@
+---
+title: "Métodos computacionales para las ciencias sociales"
+subtitle: "Herramientas para datasets grandes"
+format: 
+    revealjs:
+      auto-stretch: false
+      scrollable: true
+      link-external-newwindow: true
+css: style.css
+editor: source
+execute:
+  echo: true
+  message: false
+---
+
+## Contenidos
+
+-   Estrategias simples
+-   arrow
+-   data.table
+-   bases de datos
+
+## Motivación
+
+Estoy interesado en trabajar con datos del Censo de 2017
+
+```{r cargar paquetes, echo=FALSE}
+library(dplyr)
+library(readr)
+library(tictoc)
+library(data.table)
+library(arrow)
+library(stringr)
+library(DT)
+library(ggplot2)
+library(plotly)
+library(lubridate)
+library(DBI)
+library(duckdb)
+library(readxl)
+options(scipen = 999)
+```
+
+```{r, eval=FALSE}
+personas <- read_csv2("data/csv-personas-censo-2017/Microdato_Censo2017-Personas.csv")
+
+```
+
+R asigna aproximadamente 6.3 GB en memoria
+
+Durante la carga se llegan a necesitar más de 12 GB
+
+. . .
+
+**Consecuencia**: Si tengo menos de 12 GB, probablemente, tendré problemas para cargar el archivo
+
+# ¿Alguna idea?
+
+## Exploremos las primeras 100 filas del archivo con el parámetro n_max
+
+```{r}
+personas <- read_csv2("data/csv-personas-censo-2017/Microdato_Censo2017-Personas.csv", 
+                      n_max = 100)
+names(personas)
+```
+
+## Antes de seguir
+
+**Terminología:**
+
+-   Memoria: almacenamiento de acceso rápido
+-   Disco: capacidad de almacenamiento
+-   Procesador: capacidad de procesar datos
+
+## Seleccionando columnas
+
+Estamos interesados en estudiar la escolaridad a nivel comunal
+
+. . .
+
+Podemos seleccionar solo las columnas que necesitamos
+
+```{r, eval=TRUE}
+
+time1 <- Sys.time()
+personas <- read_csv2("data/csv-personas-censo-2017/Microdato_Censo2017-Personas.csv", 
+                      col_select = c("COMUNA", "P08", "P09", "ID_ZONA_LOC", "AREA", "NVIV", "ESCOLARIDAD")
+)
+time2 <- Sys.time()
+
+```
+
+```{r tiempo-carga-dplyr, echo=FALSE}
+tiempo_dplyr <- time2 - time1
+```
+
+```{r }
+memoria_asignada <-  object.size(personas)[[1]] / 1073741824
+```
+
+```{r, echo=FALSE}
+sprintf("La nueva variable requiere %s gigas en memoria", round(memoria_asignada, 4))
+sprintf("El tiempo de lectura es de  %s segundos", tiempo_dplyr)
+
+```
+
+Pueden seguir habiendo problemas para cargar, pero vamos mejorando
+
+## Experimento
+
+Experimenten en sus computadores
+
+. . .
+
+Utilizando el siguiente código, prueben diferentes números de filas en n_max y vean cómo responden sus computadores.
+
+. . .
+
+Testeen con los siguientes valores: 1.000, 10.000, 100.000, 1.000.000, 10.000.000, 15.000.000
+
+```{r ejemplo-experimento, eval=FALSE}
+
+time1 <- Sys.time()
+personas <- read_csv2("data/csv-personas-censo-2017/Microdato_Censo2017-Personas.csv", 
+                      n_max = 1000000
+)
+time2 <- Sys.time()
+sprintf("El tiempo de lectura es de  %s segundos", round(time2 -time1, 2))
+```
+
+## Ahora calculemos algunas cosas
+
+```{r cargar etiquetas, echo=FALSE}
+etiquetas <- read_csv2("data/csv-personas-censo-2017/etiquetas_persona_comuna_16r.csv")
+```
+
+```{r escolaridad-comuna}
+library(dplyr)
+
+tic()
+media_escolaridad <-  personas %>% 
+  rename(sexo = P08,
+         edad = P09) %>% 
+  filter(edad >= 30 & edad <= 60) %>%  
+  group_by(COMUNA) %>% 
+  summarise(media = round(mean(ESCOLARIDAD), 2)) %>% 
+  left_join(etiquetas, by = c("COMUNA" = "valor")) %>% 
+  arrange(desc(media))
+toc()
+
+media_escolaridad
+```
+
+## Probemos más desagregaciones
+
+Repetimos, pero incluyendo sexo
+
+```{r escolaridad-sexo-comuna}
+
+tic()
+media_escolaridad <-  personas %>% 
+  rename(sexo = P08,
+         edad = P09) %>% 
+  filter(edad >= 30 & edad <= 60) %>%  
+  group_by(COMUNA, sexo) %>% 
+  summarise(media = round(mean(ESCOLARIDAD), 2)) %>% 
+  left_join(etiquetas, by = c("COMUNA" = "valor")) 
+toc()
+media_escolaridad
+```
+
+## Complejicemos el procesamiento
+
+Vamos a incluir tramo etario
+
+```{r escolaridad-tramo-sexo-area}
+
+personas_editado <-  personas %>% 
+  rename(sexo = P08,
+         edad = P09,
+         area = AREA
+         ) %>% 
+  mutate(tramo_edad = case_when(
+    edad <= 9 ~ 1,
+    edad <= 19 ~ 2,
+    edad <= 29 ~ 3,
+    edad <= 39 ~ 4,
+    edad <= 49 ~ 5,
+    edad <= 59 ~ 6,
+    edad <= 69 ~ 7,
+    edad <= 79 ~ 8,
+    edad <= 89 ~ 9,
+    edad <= 99 ~ 10,
+    edad >= 100 ~ 11
+  )) 
+
+tic()
+resultado <- personas_editado %>% 
+  group_by(COMUNA, sexo, tramo_edad, area) %>% 
+  summarise(media = round(mean(ESCOLARIDAD), 2)) %>% 
+  left_join(etiquetas, by = c("COMUNA" = "valor")) %>% 
+  arrange(desc(media))
+toc()
+  
+```
+
+## Aún más complejidad
+
+Ahora calculamos la media para más de 9.000.000 de grupos
+
+```{r escolaridad-vivienda}
+media_escolaridad <-  personas %>% 
+  rename(sexo = P08,
+         edad = P09) %>% 
+  mutate(id_viv = paste0(ID_ZONA_LOC, NVIV)) 
+
+tic()
+personas_vivienda <- media_escolaridad %>% 
+  group_by(id_viv, sexo) %>% 
+  summarise(media = round(mean(ESCOLARIDAD), 2))
+toc()
+
+```
+
+```{r limpiar ambiente, echo=FALSE}
+rm(personas_vivienda)
+```
+
+. . .
+
+**¿Qué pasa si tengo que correr un proceso que ejecuta 20 tareas similares varias veces al día?**
+
+. . .
+
+**`dplyr` es una excelente herramienta, pero este tiempo torna inviable procesamientos largos y reiterados**
+
+## Introducción a data.table
+
+`data.table` es un paquete pensado para minimizar el tiempo de ejecución
+
+![](images/data.table_-1.webp){fig-align="center"}
+
+. . .
+
+**Desventaja**: está fuera del mundo `tidyverse` y su sintaxis es completamente diferente
+
+## Introducción a data.table
+
+Instalación
+
+```{r, eval=FALSE}
+install.packages("data.table")
+```
+
+. . .
+
+Para cargar un archivo csv, contamos con la función fread
+
+```{r, eval=FALSE}
+library(data.table)
+personas <- fread("data/csv-personas-censo-2017/Microdato_Censo2017-Personas.csv")
+```
+
+## Comparación en lectura
+
+```{r cargar tidyverse, message=FALSE, eval=FALSE}
+personas <- read_csv2("data/csv-personas-censo-2017/Microdato_Censo2017-Personas.csv", 
+                      col_select = c("COMUNA", "P08", "P09", "ID_ZONA_LOC", 
+                                     "AREA", "NVIV", "ESCOLARIDAD"))
+
+memoria_asignada_dplyr <-  object.size(personas)[[1]] / 1073741824
+class(personas)
+```
+
+```{r}
+tiempo_dplyr
+```
+
+```{r, echo=FALSE}
+sprintf("La variable requiere %s gigas en memoria", round(memoria_asignada, 4))
+
+```
+
+. . .
+
+```{r cargar data.table}
+tic()
+personas <- fread("data/csv-personas-censo-2017/Microdato_Censo2017-Personas.csv",
+                  select = c("COMUNA", "P08", "P09", "ID_ZONA_LOC", 
+                                     "AREA", "NVIV", "ESCOLARIDAD"))
+toc()
+
+memoria_asignada_dt <-  object.size(personas)[[1]] / 1073741824
+class(personas)
+```
+
+```{r, echo=FALSE}
+sprintf("La nueva variable requiere %s gigas en memoria", round(memoria_asignada_dt, 4))
+
+```
+
+## Comparación en procesamiento
+
+Vimos que dplyr se demoraba \~37 segundos en este procesamiento
+
+```{r, eval=FALSE}
+media_escolaridad %>% 
+  group_by(id_viv, sexo) %>% 
+  summarise(media = round(mean(ESCOLARIDAD), 2))
+```
+
+. . .
+
+Veamos cómo sería en el caso de `data.table`
+
+. . .
+
+```{r}
+personas[, id_viv := paste0( paste0(ID_ZONA_LOC, NVIV))]
+colnames(personas)[2] <- "sexo"
+colnames(personas)[3] <- "edad"
+
+tic()
+personas_vivienda <- personas[, round(mean(ESCOLARIDAD), 2) , by = .(id_viv, sexo)]
+toc()
+
+```
+
+## Sintaxis básica de data.table
+
+![](images/dt_index.png){fig-align="center"}
+
+### [i]{style="color:red"}: corresponde a las filas.
+
+### [j]{style="color:steelblue"}: corresponde a las columnas.
+
+### [by]{style="color:green"}: corresponde a las agrupaciones que queremos hacer.
+
+## Sintaxis básica
+
+<br> <br> <br> <br>
+
+![](images/I_.png){fig-align="center"}
+
+## Sintaxis básica
+
+### Parametro [i]{style="color:red"}:
+
+**Nos permite**:
+
+-   Indexar filas.
+
+-   Filtrar filas por valores o categorías.
+
+-   Aplicar funciones específicas por filas.
+
+## Sintaxis básica: ejemplos
+
+### Parametro [i]{style="color:red"}:
+
+Filtremos las primeras 6 filas
+
+```{r}
+# Podemos filtrar así
+personas[1:6,] 
+# ... o así
+#personas[1:6]
+
+
+```
+
+## Sintaxis básica: ejemplos
+
+### Parametro [i]{style="color:red"}:
+
+Podemos usar cualquier condición que queramos
+
+```{r}
+personas[COMUNA == 15202, ]
+```
+
+## Sintaxis básica: ejemplos
+
+### Parametro [i]{style="color:red"}:
+
+El parámetro *i* también soporta funciones
+
+```{r}
+personas[order(COMUNA), ]
+
+```
+
+## Sintaxis básica
+
+![](images/J_.png){fig-align="center"}
+
+## Sintaxis básica: ejemplos
+
+Podemos combinar selección de filas y columnas
+
+```{r}
+personas[1:3 ,"COMUNA"]
+
+```
+
+. . .
+
+Es posible seleccionar varias columnas
+
+```{r}
+personas[1:3 ,c("COMUNA","AREA")]
+
+```
+
+## Sintaxis básica: ejemplos
+
+Podemos utilizar funciones sobre las columnas
+
+```{r}
+personas[, mean(ESCOLARIDAD)]
+
+```
+
+. . .
+
+Podemos calcular min, max, median o cualquier otra función de resumen
+
+```{r}
+personas[, min(ESCOLARIDAD)]
+personas[, max(ESCOLARIDAD)]
+personas[, median(ESCOLARIDAD)]
+
+```
+
+## Sintaxis básica: ejemplos
+
+Utilizando .() es posible ejecutar más de una función
+
+```{r}
+personas[,.(mean(ESCOLARIDAD),max(ESCOLARIDAD))]
+```
+
+. . .
+
+Es posible asignar los resultados a una columna
+
+```{r}
+personas[,.(media = mean(ESCOLARIDAD), max =  max(ESCOLARIDAD))]
+
+```
+
+## Sintaxis básica: ejemplos
+
+Para crear una columna y mutar nuestro dataframe, utilizamos el operador :=
+
+```{r}
+personas[, escolaridad2 := ESCOLARIDAD + 1]
+names(personas)
+```
+
+. . .
+
+**¿Cómo podríamos crear tramos de escolaridad?**
+
+## Sintaxis básica: ejemplos
+
+En data.table existe una función llamada `fifelse`
+
+Funciona muy parecido a `if_else` de `dplyr`
+
+```{r}
+personas[, escolaridad_tramos := fifelse(ESCOLARIDAD >= 15 & ESCOLARIDAD != 99, "superior", "otra" )]
+
+```
+
+. . .
+
+Si queremos una variable *dummy* para sexo podemos hacer lo siguiente
+
+```{r}
+personas[, hombre_dummy := fifelse(sexo == 1, 1, 0 )]
+
+```
+
+## Sintaxis básica
+
+<br> <br> <br>
+
+![](images/J_BY.png){fig-align="center"}
+
+## Sintaxis básica
+
+### Parámetro [by]{style="color:green"}:
+
+Nos permite agrupar por variables.
+
+Esta agrupación siempre se utiliza aplicando funciones a ciertas columnas para hacer resúmenes de los datos.
+
+## Sintaxis básica con by
+
+**by**: variable de agrupación
+
+**j**: la columna y función que queremos evaluar.
+
+Media de escolaridad, según sexo
+
+```{r}
+personas[,mean(ESCOLARIDAD), by = .(sexo)]
+```
+
+. . .
+
+Podemos incluir todas las variables de agrupación que queramos
+
+```{r}
+
+personas[,mean(ESCOLARIDAD), by = .(sexo, AREA)]
+
+```
+
+## Sintaxis básica con by
+
+Existen funciones especiales que comienzan con un punto
+
+La función .N cuenta el número de filas para una agrupación determinada
+
+. . .
+
+```{r}
+personas[, .N , by = .(sexo, AREA)]
+```
+
+## Sintaxis básica con by
+
+La función .SD (*subset of data*) devuelve una fila arbitraria de un conjunto de datos
+
+. . .
+
+En este caso estamos devolviendo la primera fila de la intersección sexo-área
+
+```{r}
+personas[, .SD[1] , by = .(sexo, AREA)]
+```
+
+## Concatenando acciones
+
+Imagenemos que solo nos interesan las columnas sexo y AREA
+
+. . .
+
+`data.table` nos permite concatenar acciones mediante la sintaxis DT\[...\]\[...\]
+
+. . .
+
+Se lee así:
+
+. . .
+
+-   Del dataframe *personas*, seleccionamos la primera fila de la intersección sexo-AREA, junto a todas las columnas
+
+-   Del resultado anterior, extraemos solo las columnas sexo y AREA
+
+```{r}
+personas[, .SD[1] , by = .(sexo, AREA)] [, c("sexo", "AREA")]
+```
+
+## Ejercicio
+
+Usaremos el dataset iris, que está cargado en R
+
+```{r}
+iris <- iris
+iris_dt <- as.data.table(iris) 
+names(iris_dt)
+head(iris_dt)
+```
+
+## Ejercicio
+
+Utilizando *iris* realice las siguientes operaciones con `data.table`
+
+-   Calcule el mínimo de las columnas Sepal.Length y Sepal.Width
+
+-   Seleccione la primera fila de cada especie (setosa, virginica y versicolor), conservado únicamente la columna *Species*
+
+-   Construya una nueva columna llamada *ratio_length_width* que sea igual a la división de Petal.Length y Petal.Width
+
+-   Calcule la media de *ratio_length_width* para cada especie y guarde el resultado en una columna llamada *media_ratio*
+
+```{r, echo=FALSE, eval=FALSE}
+library(data.table)
+
+iris_dt[, .(largo_sepalo_min = min(Sepal.Length), ancho_sepalo_min = min(Sepal.Width) ) ]
+iris_dt[, .SD[1], by = Species ][, Species]
+iris_dt[, ratio_petal_length := Petal.Length /Petal.Width   ]
+iris_dt[, .(media_ratio = mean(ratio_petal_length) ), by = Species ]
+
+
+```
+
+## Resumen hasta el momento
+
+Algunos datasets pueden ser desafiantes en cuanto a su tamaño
+
+. . .
+
+Los datos del censo 2017 no son especialmente voluminosos, pero aún así pueden causar problemas para un PC doméstico
+
+. . .
+
+Lo más simple es reducir la cantidad de datos cargados
+
+. . .
+
+`data.table` es una herramienta muy poderosa y fácil de utilizar
+
+. . .
+
+Elegir `data.table` sobre `dplyr` puede ser la diferencia entre lograr o no la tarea de análisis que nos propongamos
+
+## Ventajas de data.table
+
+-   Notablemente más rápido y eficiente que `dplyr`
+
+-   Muy flexible
+
+-   Se encuentra en un estado avanzado de maduración
+
+-   Buena documentación oficial
+
+-   Comunidad amplia de usuarios
+
+## Desventajas de data.table
+
+-   La sintaxis no es tan intuitiva
+
+-   Solo existe en R: no facilita un trabajo fluido entre lenguajes
+
+
+
+
+# apache arrow {.center background-color="aquamarine"}
+
+## Introducción a arrow
+
+![](images/arrow.png){fig-align="center" width="200px"}
+
+Implementación en R de la librería Apache Arrow de C++
+
+. . .
+
+Provee un backend de c++ para funciones de dplyr
+
+. . .
+
+Usamos la potencia de C++ con sintaxis dplyr
+
+## Introducción a arrow
+
+Utiliza un formato columnar para almacenar los datos en memoria
+
+![](images/columnar-format.png){fig-align="center" width="604"}
+
+## Primeros pasos
+
+```{r, eval=FALSE}
+install.packages("arrow")
+```
+
+```{r limpiar, echo=FALSE}
+rm(personas)
+```
+
+Arrow funciona muy bien con formatos de datos *columnares*
+
+. . .
+
+Dos formatos populares son feather y parquet
+
+. . .
+
+Vamos a guardar nuestro objeto data.table en formato parquet con la función write_parquet
+
+```{r, eval=FALSE}
+write_parquet(personas,
+              "data/csv-personas-censo-2017/Microdato_Censo2017-Personas.parquet")
+```
+
+## Primeros pasos
+
+Para leer un archivo parquet, usamos la función read_parquet
+
+El parámetro as_data_frame = F es clave
+
+```{r}
+library(arrow)
+
+personas <- read_parquet("data/csv-personas-censo-2017/Microdato_Censo2017-Personas.parquet", 
+                            as_data_frame = F, 
+                            col_select = c("COMUNA", "P08", "P09", "ID_ZONA_LOC", 
+                                     "AREA", "NVIV", "ESCOLARIDAD") )
+
+
+
+```
+
+. . .
+
+Ahora tenemos un objeto arrow
+
+```{r}
+class(personas)
+
+```
+
+## Explorando el dataset
+
+La función head() devuelve el nombre y tipos de las columnas, pero no los datos
+
+```{r}
+personas %>% 
+  head()
+```
+
+## Repitamos la operación de antes
+
+Repetimos la agrupación a nivel de id_viv-sexo
+
+```{r}
+media_escolaridad <- personas %>% 
+  rename(sexo = P08,
+         edad = P09) %>% 
+  mutate(id_viv = paste0(ID_ZONA_LOC, NVIV)) 
+
+tic()
+personas_vivienda <- media_escolaridad %>% 
+  group_by(id_viv, sexo) %>% 
+  summarise(media = round(mean(ESCOLARIDAD), 2)) 
+toc()
+```
+
+Tarda prácticamente 0 segundos.
+
+. . .
+
+Sospechoso...
+
+## Repitamos la operación de antes
+
+Revisemos el resultado ¿Es lo que esperábamos?
+
+```{r}
+personas_vivienda %>% 
+  head()
+```
+
+## Repitamos la operación de antes
+
+El código aún no se ejecuta
+
+Para ejecutar el código y "traernos" los resultados, debemos usar *collect*
+
+. . .
+
+```{r}
+tic()
+personas_vivienda <- media_escolaridad %>% 
+  group_by(id_viv, sexo) %>% 
+  summarise(media = round(mean(ESCOLARIDAD), 2)) %>% 
+  collect()
+toc()
+```
+
+. . .
+
+`collect()` ejecuta el proceso y devuelve un dataframe
+
+## Revisemos el código
+
+Ahora sí podemos ver datos
+
+```{r}
+personas_vivienda %>% 
+  head()
+```
+
+```{r, echo=FALSE}
+rm(personas_vivienda)
+```
+
+## Explicación
+
+El paquete arrow funciona con algo llamado *lazy evalue*
+
+. . .
+
+Las cosas no se evalúan sino hasta que realmente se requieren
+
+. . .
+
+Las funciones *collect* y *compute* ejecutan realmente el código
+
+## Particionando
+
+Vamos a escribir un archivo para cada comuna
+
+```{r, eval=FALSE}
+tic()
+personas %>%  
+  group_by(COMUNA) |>
+  write_dataset("data/particiones")
+toc()
+```
+
+**Importante**: La partición tiene relación con el tipo de consultas
+
+## Leyendo un dataset
+
+Usamos la función open_dataset, indicando el directorio en el que están los datos
+
+```{r cargar particiones censo}
+personas <- open_dataset("data/particiones")
+```
+
+Volvamos a probar el código de antes
+
+```{r id_viv-sexo-arrow}
+
+media_escolaridad <- personas %>% 
+  rename(sexo = P08,
+         edad = P09) %>% 
+  mutate(id_viv = paste0(ID_ZONA_LOC, NVIV)) 
+
+tic()
+personas_vivienda <- media_escolaridad %>% 
+  group_by(id_viv, sexo) %>% 
+  summarise(media = round(mean(ESCOLARIDAD), 2)) %>% 
+  collect()
+toc()
+```
+
+```{r, echo=FALSE, include=FALSE}
+rm(personas_vivienda)
+gc()
+```
+
+## Sobrepasando la memoria
+
+**¿Qué pasa si tengo que trabajar con un dataset más grande que la memoria del computador?**
+
+. . .
+
+Vamos a trabajar con un [dataset](https://www.kaggle.com/datasets/lopezbec/covid19-tweets-dataset) de 53.6 GB
+
+![](images/covid-dataset.png){fig-align="center"}
+
+## Descripción dataset
+
+Para cada hora, tenemos un archivo csv
+
+![](images/ejemplo-dataset.png){fig-align="center" width="500px"}
+
+## Cargando dataset
+
+**sources**: directorio con los datos
+
+**format**: formato de los archivos
+
+```{r cargar details csv}
+# Tabla con detalles
+details <- open_dataset(sources =  "data/twitter/archive/Summary_Details/",
+                        format = "csv")
+
+```
+
+```{r}
+names(details)
+```
+
+## Exploremos tabla de detalles
+
+Primeras filas del dataset
+
+```{r}
+details %>% 
+  head(5) %>% 
+  collect() 
+
+```
+
+## Exploremos tabla de detalles
+
+Número total de filas
+
+```{r n filas details csv}
+details %>% 
+  summarise(rows = n() ) %>% 
+  collect()  
+
+```
+
+. . .
+
+Número de tuits por país
+
+```{r tuits-pais csv}
+tic()
+details %>% 
+  group_by(Country) %>% 
+  summarise(frecuencia = n()) %>% 
+  collect()
+toc()
+```
+
+```{r escribir un dataset parquet, eval=FALSE, echo=FALSE, include=FALSE}
+
+###### Escribir deatails
+mes <- "01"
+
+details <- open_dataset(sprintf("data/twitter/archive/Summary_Details/2022_%s/", mes)  , format = "csv")
+
+tic()
+details %>% 
+  mutate(day = stringr::str_sub(start = 1, end = 10, `Date Created`)) %>% 
+  mutate(year = stringr::str_sub(start = -4, end = -1, `Date Created`)) %>%
+  mutate(hour = stringr::str_sub(start = 12, end = 13, `Date Created`)) %>% 
+  mutate(new_date = paste(year, day, hour, sep = "_")) %>% 
+  select( -year, -hour) %>% 
+  group_by(new_date) %>% 
+  summarise(frecuencia = n()) %>% 
+  collect()
+  #write_dataset(path = sprintf("data/twitter/archive-parquet/Summary_Details/2022_%s-parquet/", mes), partitioning = "new_date" )
+toc()
+
+
+##### Escribir sentiment 
+mes <- "03"
+
+sentiment <- open_dataset(sprintf("data/twitter/archive/Summary_Sentiment_ES/2022_%s/", mes)  , format = "csv")
+details <- open_dataset(sprintf("data/twitter/archive/Summary_Details/2022_%s/", mes), format = "csv")
+
+
+
+# 
+tic()
+details %>% 
+  select(Tweet_ID, `Date Created`) %>% 
+  right_join(sentiment , by = "Tweet_ID") %>% 
+  mutate(day = stringr::str_sub(start = 1, end = 10, `Date Created`)) %>% 
+  mutate(year = stringr::str_sub(start = -4, end = -1, `Date Created`)) %>%
+  mutate(hour = stringr::str_sub(start = 12, end = 13, `Date Created`)) %>% 
+  mutate(new_date = paste(year, day, hour, sep = "_")) %>%
+  select( -year, -hour) %>% 
+  write_dataset(path = sprintf("data/twitter/archive-parquet/Summary_Sentiment_ES/2022_%s-parquet/", mes))
+toc()
+
+
+sentiment <- open_dataset("data/twitter/archive/Summary_Sentiment_ES/", format = "csv")
+sentiment_parquet <- open_dataset("data/twitter/archive-parquet/Summary_Sentiment_ES/")
+details_parquet <- open_dataset("data/twitter/archive-parquet/Summary_Details")
+
+
+# Pequeña comprobación sobre el número de filas
+sentiment_parquet %>% 
+  summarise(n = n()) %>% 
+  collect()
+
+sentiment %>% 
+  summarise(n = n()) %>% 
+  collect()
+
+
+```
+
+## Ahora probemos con archivos parquet
+
+```{r}
+details_parquet <- open_dataset("data/twitter/archive-parquet/Summary_Details")
+```
+
+```{r limpiar1, include=FALSE, echo=FALSE}
+gc()
+```
+
+```{r}
+details_parquet %>% 
+  summarise(rows = n() ) %>% 
+  collect()  
+```
+
+. . .
+
+¡Tardamos menos de un segundo!
+
+```{r}
+tic()
+details_parquet %>% 
+  group_by(Country) %>% 
+  summarise(frecuencia = n()) %>% 
+  collect()
+toc()
+```
+
+## Una operación más compleja
+
+Carguemos tabla de sentimiento y details desde formato csv
+
+```{r}
+sentiment_csv <- open_dataset("data/twitter/archive/Summary_Sentiment_ES/", format = "csv")
+details_csv <- open_dataset("data/twitter/archive/Summary_Details/", format = "csv")
+
+```
+
+```{r limpiar2, include=FALSE, echo=FALSE}
+gc()
+```
+
+. . .
+
+```{r}
+details_csv %>%
+  left_join(sentiment_csv, by = "Tweet_ID") %>%  # agregar información de la tabla de sentimientos
+  group_by(Country) %>% 
+  summarise(frecuencia = mean(Probability_pos, na.rm = T)) %>% 
+  collect() %>% 
+  arrange(Country)
+
+```
+
+## Tentación con parquet
+
+```{r, eval=FALSE}
+sentiment_parquet <- open_dataset("data/twitter/archive-parquet/Summary_Sentiment_ES")
+details_parquet <- open_dataset("data/twitter/archive-parquet/Summary_Details")
+
+```
+
+Si corren esto, es probable que sobrepasen la memoria de su computador
+
+```{r ejemplo no evaluado, eval=FALSE}
+#| eval: false
+details_csv %>%
+  left_join(sentiment_csv, by = "Tweet_ID") %>% 
+  group_by(Country) %>% 
+  summarise(frecuencia = mean(Probability_pos, na.rm = T)) %>% 
+  collect()
+
+```
+
+```{r limpiar3, include=FALSE, echo=FALSE}
+gc()
+```
+
+## Algo más interesante
+
+Calculemos el número de tuits por hora
+
+```{r tabla-grafico}
+tic()
+frecuencia_fecha <- details_parquet %>% 
+  mutate(year = stringr::str_sub(start = -4, end = -1, `Date Created`)) %>%
+  mutate(time = as.numeric(stringr::str_sub(start = 12, end = 13, `Date Created`))) %>% 
+  mutate(month = str_sub(`Date Created`, start = 5, end = 7)) %>% 
+  mutate(day = str_sub(`Date Created`, start = 9, end = 10)) %>% 
+  mutate(month = case_when(
+    month == "Jan" ~ "01",
+    month == "Feb" ~ "02",
+    month == "Mar" ~ "03",
+    month == "Apr" ~ "04",
+    month == "May" ~ "05",
+    month == "Jun" ~ "06",
+    month == "Jul" ~ "07",
+    month == "Aug" ~ "08",
+    month == "Sep" ~ "09",
+    month == "Oct" ~ "10",
+    month == "Nov" ~ "11",
+    month == "Dec" ~ "12"
+  )) %>% 
+  mutate(date = paste0( year, "-", month, "-", day)) %>% 
+  group_by(date) %>% 
+  summarise(frecuencia = n()) %>% 
+  collect()
+toc()
+```
+
+## Exploremos la tabla resultante
+
+Tenemos la frecuencia para cada hora
+
+```{r explorar-tabla-plot}
+head(frecuencia_fecha)
+```
+
+## Editamos un poco la tabla
+
+Convertimos a formato fecha
+
+```{r}
+tabla_plot <-  frecuencia_fecha %>% 
+  mutate(date = as_date(date)) 
+```
+
+```{r convertir time, eval=FALSE, include=FALSE}
+mutate(date_time = lubridate::make_datetime(year = year(date)  , month = month(date), day = day(date), hour = time))
+```
+
+```{r limpiar5, include=FALSE, echo=FALSE}
+gc()
+```
+
+## Gráfico de frecuencia
+
+Usamos ggplot para el gráfico
+
+```{r}
+library(ggplot2)
+tabla_plot %>% 
+  ggplot(aes(x = date, y = frecuencia, group = 1)) +
+  geom_point() +
+  geom_line() +
+  scale_x_date(date_labels = "%Y %b %d")
+```
+
+## Limitaciones de arrow
+
+Arrow no tiene todas las funciones implementadas 
+
+```{r, error=TRUE}
+details_parquet %>%
+  group_by(Country) %>% 
+  dplyr::slice(1) %>% 
+  collect()
+```
+
+
+
+## Limitaciones de arrow
+
+```{r, error=TRUE}
+details_parquet %>%
+  group_by(Country) %>% 
+  mutate(max = max(Retweets)) %>% 
+  collect()
+
+```
+
+[Aquí](https://arrow.apache.org/docs/dev/r/reference/acero.html) encontrarán un listado de las funciones implementadas en `arrow`   
+
+
+# ¿Hay algo más poderoso? {.center background-color="aquamarine"}
+
+## duckdb
+
+![](images/duckdb-logo.png){fig-align="center" width="250px"}
+
+Motor SQL optimizado para análisis de datos
+
+. . .
+
+Utiliza un formato columnar
+
+. . .
+
+No es recomendable para aplicaciones que requieran insertar, borrar o editar filas constantemente (transacciones)
+
+## Primeros pasos con duckdb
+
+La instalación puede tomar bastante tiempo
+
+```{r eval=FALSE}
+install.packages("duckdb")
+```
+
+Nos conectamos a una base de datos efímera (:memory:)
+
+```{r}
+library(DBI)
+library(duckdb) 
+con <- dbConnect(duckdb(), dbdir = ":memory:", read_only = FALSE)
+```
+
+## Ejemplo duckdb
+
+Estamos haciendo la misma operación de hace un rato
+
+Usamos SQL para hacer la consulta (*query*)
+
+```{r}
+tic()
+dbGetQuery(con, 
+"SELECT
+  d.Country,
+  MEAN(s.Probability_pos) AS frecuencia
+FROM
+  parquet_scan('data/twitter/archive-parquet/Summary_Details/**/*.parquet')  d
+LEFT JOIN
+  parquet_scan('data/twitter/archive-parquet/Summary_Sentiment_ES/**/*.parquet')  s
+ON
+  d.Tweet_ID = s.Tweet_ID
+GROUP BY
+  d.Country
+ORDER BY d.Country
+;")
+toc()
+```
+
+```{r, include=FALSE, echo=FALSE}
+DBI::dbDisconnect(con)
+```
+
+# ¿Qué pasa si no quiero usar SQL?
+
+## dbplyr
+
+`dbplyr` es un paquete que nos permite interactuar con una base de datos usando las funciones de `dplyr`
+
+![](images/dbplyr.png){fig-align="center" width="150px"}
+
+## Ejemplo dbplyr
+
+Vamos a conectarnos a una base de datos compacta
+
+Contiene versiones pequeñas de los datos que hemos estado usando
+
+```{r}
+con <- dbConnect(duckdb(), dbdir = "data/twitter.db", read_only = FALSE)
+```
+
+. . .
+
+Al igual que con `arrow`, debemos usar `collect` para traernos los datos
+
+```{r}
+tbl(con, "details") %>% 
+  group_by(Country) %>% 
+  summarise(frecuencia = n() ) %>% 
+  collect()
+```
+
+## Podemos hacer left_join
+
+```{r, eval=FALSE}
+tbl(con, "details") %>%
+  left_join( tbl(con, "sentiment"), by = "Tweet_ID") %>% 
+  group_by(Country) %>% 
+  summarise(frecuencia = mean(Probability_pos, na.rm = T)) %>% 
+  collect()
+
+```
+
+. . .
+
+Para cerrar la conexión con la base de datos, usamos `dbDisconnect`
+
+```{r, include=FALSE, echo=FALSE}
+dbDisconnect(con)
+```
+
+## Ejercicio final
+
+Abre el archivo del censo en formato parquet
+
+Escribe un dataset, usando la comuna como variable de agrupación
+
+Lee el dataset que creaste
+
+Crea una columna que sea 1 cuando una persona es profesional (p15 = 12) y cero cuando no
+
+Calcula el número de personas profesionales por comuna
+
+Bonus: Calcula el porcentaje de profesionales a nivel comunal
+
+## Tabla comparativa
+
+```{r, echo=FALSE}
+library(kableExtra)
+tabla_comparativa <- read_excel("tabla-comparativa.xlsx")
+
+names(tabla_comparativa)[[1]] <- ""
+
+tabla_comparativa %>% 
+  kbl() %>% 
+  kable_styling(font_size = 18)
+
+```
+
+
+## Comentarios finales
+
+::: incremental
+-   `dplyr` es una excelente herramienta cuando nuestro dataset es pequeño
+-   En cierto punto, `dplyr` deja de ser útil
+-   `R` ofrece varias herramientas para procesar grandes volúmenes de información
+    -   data.table
+    -   arrow
+-   `data.table` es la herramienta ideal cuando tenemos algunos millones de filas
+:::
+
+## Comentarios finales
+
+::: incremental
+-   `arrow` es una muy buena alternativa para quienes quieren mantenerse en el `tidyverse`
+-   Logramos procesar más de 240 millones de registros en una máquina modesta
+    -   16 GB RAM
+    -   16 hilos
+-   `duckdb` es una base de datos altamente optimizada para análisis de datos
+    -   Vale la pena cuando ya tenemos varios GB de datos
+:::
+
+# **¿Hay algo después de duckdb?**
+
+## Big data
+
+High performance computing (HPC)
+
+Computación distribuida
+
+![](images/big-data-logos.png){fig-align="center" width="550"}
+
+# Métodos computacionales para las ciencias sociales {.center background-color="aquamarine"}
